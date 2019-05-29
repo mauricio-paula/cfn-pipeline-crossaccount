@@ -1,0 +1,63 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Setup da conta DevOps - Contem o repositorio SharedLibrary"
+
+Parameters:
+  DevToolsAccount:
+    Description: AWS AccountNumber for DevTools Account
+    Type: Number
+    Default: 935187548418
+
+  CMKARN:
+    Description: ARN of the KMS CMK creates in Tools account
+    Type: String
+    Default: arn:aws:kms:sa-east-1:935187548418:key/68c40aa9-4cfd-4d04-8fef-7860a256d2ec
+
+Resources:
+  Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: DevOpsRole
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              AWS:
+                - !Ref DevToolsAccount
+            Action:
+              - sts:AssumeRole
+      Path: /
+
+  Policy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: DevOpsPolicy
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Action:
+              - codecommit:BatchGetRepositories
+              - codecommit:Get*
+              - codecommit:GitPull
+              - codecommit:List*
+              - codecommit:CancelUploadArchive
+              - codecommit:UploadArchive
+              - s3:*
+            Resource: "*"
+          -
+            Effect: Allow
+            Action:
+              - kms:*
+            Resource: !Ref CMKARN
+      Roles:
+        -
+          !Ref Role
+
+  Repository:
+    Type: AWS::CodeCommit::Repository
+    Properties:
+      RepositoryName: "sharedlibrary"
+      RepositoryDescription: Repositorio de Bibliotecas Compartilhadas

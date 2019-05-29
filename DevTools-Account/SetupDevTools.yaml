@@ -1,0 +1,298 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Setup da conta DevTools"
+
+Parameters:
+  DevOpsAccount:
+    Description: AWS AccountNumber for DevOps Account
+    Type: Number
+    Default: 300003219274
+  DevAccount:
+    Description: AWS AccountNumber for Dev Account
+    Type: Number
+    Default: 255538382414
+  ProjectName:
+    Description: Name of the Project
+    Type: String
+    Default: lab-itau
+  MSName:
+    Description: Name of the MicroService
+    Type: String
+    Default: ms01
+  DevOpsRole:
+    Description: Role para CrossAccount com a conta de DevOps
+    Type: String
+    Default: arn:aws:iam::300003219274:role/DevOpsRole
+  DevOpsCMKARN:
+    Description: ARN do CMK da conta DevOps
+    Type: String
+    Default: arn:aws:kms:sa-east-1:300003219274:key/5442836b-cd13-4094-ac1d-5be1e872112d
+
+Resources:
+  Repository:
+    Type: AWS::CodeCommit::Repository
+    Properties:
+      RepositoryName: !Ref MSName
+      RepositoryDescription: Repositorio do Micro Servico
+
+
+  ArtifactStoreBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Join [ "-", [ !Ref ProjectName, !Ref MSName ] ]
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              KMSMasterKeyID: !Sub 'arn:aws:kms:${AWS::Region}:${AWS::AccountId}:${KMSAlias}'
+              SSEAlgorithm: 'aws:kms'
+
+  ProjectPipeline: 
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      RoleArn: !GetAtt [CodePipelineRole, Arn]
+      Name: !Join [ "-", [ !Ref ProjectName, !Ref MSName ] ]
+      ArtifactStore:
+        Location: !Ref ArtifactStoreBucket
+        Type: S3
+    
+      Stages: 
+        - Name: Source
+          Actions:
+            - Name: App
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Version: "1"
+                Provider: CodeCommit
+              Configuration:
+                BranchName: master
+                RepositoryName: !Ref MSName
+              OutputArtifacts:
+                - Name: Out-Source-App
+              RunOrder: 1
+            - Name: "Libs-Gates"
+              RoleArn: !Ref DevOpsRole
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeCommit
+                Version: "1"
+              Configuration:
+                BranchName: master
+                RepositoryName: sharedlibrary
+              InputArtifacts: []
+              OutputArtifacts:
+                - Name: "Libs"
+              RunOrder: 1
+
+        - Name: ContinuousIntegration
+          Actions:
+          - Name: UnitTests
+            ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: "1"
+                Provider: CodeBuild
+            OutputArtifacts:
+              - Name: UnitTests
+            InputArtifacts:
+              - Name: Out-Source-App
+            Configuration:
+                ProjectName: !Ref UnitTests
+            RunOrder: 1
+
+  UnitTests:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: 'buildspec/unittests.yml'
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/python:3.6.5
+      Artifacts:
+        Type: CODEPIPELINE
+      ServiceRole: !Ref CodeBuildRole
+      TimeoutInMinutes: 10
+
+
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action: ['sts:AssumeRole']
+          Effect: Allow
+          Principal:
+            Service: [codebuild.amazonaws.com]
+        Version: '2012-10-17'
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+
+
+  CodePipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: CodePipelineRole
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              AWS:
+                - !Ref DevOpsAccount
+              Service:
+                - codepipeline.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Path: /
+
+
+  AssumeRolePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: AssumeRolePolicy
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Action:
+              - sts:AssumeRole
+            Resource:
+              - !Ref DevOpsRole
+          -
+            Effect: Allow
+            Action:
+              - codecommit:BatchGetRepositories
+              - codecommit:Get*
+              - codecommit:GitPull
+              - codecommit:List*
+              - codecommit:CancelUploadArchive
+              - codecommit:UploadArchive
+            Resource: "*"
+          -
+            Effect: Allow
+            Action:
+              - s3:*
+            Resource: "*"
+      Roles:
+        -
+          !Ref CodePipelineRole
+
+  KMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: Used by Assumed Roles in DevTools account to Encrypt/Decrypt code
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: "2012-10-17"
+        Id: !Ref AWS::StackName
+        Statement:
+          -
+            Sid: Allows admin of the key
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action:
+              - "kms:Create*"
+              - "kms:Describe*"
+              - "kms:Enable*"
+              - "kms:List*"
+              - "kms:Put*"
+              - "kms:Update*"
+              - "kms:Revoke*"
+              - "kms:Disable*"
+              - "kms:Get*"
+              - "kms:Delete*"
+              - "kms:ScheduleKeyDeletion"
+              - "kms:CancelKeyDeletion"
+            Resource: "*"
+          -
+            Sid: Allow use of the key for CryptoGraphy
+            Effect: Allow
+            Principal:
+              AWS:
+                - !Sub arn:aws:iam::${DevOpsAccount}:root
+                - !Sub arn:aws:iam::${DevAccount}:root
+            Action:
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: "*"
+
+  KMSAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/CodepipelineCrossaccount-key
+      TargetKeyId: !Ref KMSKey
+
+  BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ArtifactStoreBucket
+      PolicyDocument: 
+        !Sub > 
+          {
+              "Version": "2012-10-17",
+              "Id": "SSEAndSSLPolicy",
+              "Statement": [
+                  {
+                      "Sid": "DenyUnEncryptedObjectUploads",
+                      "Effect": "Deny",
+                      "Principal": "*",
+                      "Action": "s3:PutObject",
+                      "Resource": "arn:aws:s3:::${ArtifactStoreBucket}/*",
+                      "Condition": {
+                          "StringNotEquals": {
+                              "s3:x-amz-server-side-encryption": "aws:kms"
+                          }
+                      }
+                  },
+                  {
+                      "Sid": "DenyInsecureConnections",
+                      "Effect": "Deny",
+                      "Principal": "*",
+                      "Action": "s3:*",
+                      "Resource": "arn:aws:s3:::${ArtifactStoreBucket}/*",
+                      "Condition": {
+                          "Bool": {
+                              "aws:SecureTransport": "false"
+                          }
+                      }
+                  },
+                  {
+                      "Sid": "",
+                      "Effect": "Allow",
+                      "Principal": {
+                          "AWS": [
+                            "arn:aws:iam::${AWS::AccountId}:root",
+                            "arn:aws:iam::${DevOpsAccount}:root",
+                            "arn:aws:iam::${DevAccount}:root"
+                          ]
+                      },
+                      "Action": [
+                          "s3:Get*",
+                          "s3:Put*"
+                      ],
+                      "Resource": "arn:aws:s3:::${ArtifactStoreBucket}/*"
+                  },
+                  {
+                      "Sid": "",
+                      "Effect": "Allow",
+                      "Principal": {
+                          "AWS": [ 
+                            "arn:aws:iam::${AWS::AccountId}:root", 
+                            "arn:aws:iam::${DevOpsAccount}:root",
+                            "arn:aws:iam::${DevAccount}:root"
+                          ]
+                      },
+                      "Action": "s3:ListBucket",
+                      "Resource": "arn:aws:s3:::${ArtifactStoreBucket}"
+                  }
+              ]
+          }          
